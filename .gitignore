@@ -1,0 +1,14 @@
+# Local editor / Python byproducts
+.DS_Store
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+# Do not commit real customer data, secrets, checkpoints, or generated Delta files
+checkpoints/
+_schema/
+*.parquet
+*.snappy.parquet
