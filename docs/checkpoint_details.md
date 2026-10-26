@@ -233,3 +233,199 @@ Sample answer:
 "Databricks Auto Loader uses Structured Streaming checkpoints to persist file-discovery state, source offsets, and completed micro-batches. When the pipeline restarts, Auto Loader uses the checkpoint to resume processing from its previously recorded progress rather than starting from scratch. Combined with Delta Lake's transactional writes, this supports reliable, fault-tolerant ingestion and exactly-once processing semantics under the supported configuration."
 
 One important distinction: The checkpoint folder is not your Bronze table and does not contain your actual ingested business records. It stores operational state needed to manage streaming progress and recovery.
+
+
+Databricks Auto Loader supports parallel processing by leveraging Apache Spark's distributed computing architecture. It can discover thousands or millions of incoming files and process multiple files simultaneously across Spark executors.
+
+The important distinction is that Auto Loader discovers and tracks files, while Spark executes the data processing in parallel.
+
+## 1. How parallel execution works in Auto Loader
+
+Imagine you have 1,000 CSV files containing 10 million order records.
+
+Source: Unity Catalog Volume
+
+1,000 CSV files · 10 million records
+
+Auto Loader — File Discovery
+
+Tracks new files and prepares micro-batches
+
+Spark distributed execution
+
+Worker 1
+
+Parallel tasks
+
+Worker 2
+
+Parallel tasks
+
+Worker 3
+
+Parallel tasks
+
+Worker 4
+
+Parallel tasks
+
+Each worker executes multiple tasks, subject to available CPU cores
+
+Bronze Delta Table
+
+Distributed writes with Delta transactions
+
+Spark does not necessarily assign one file to one worker. Small files can be grouped into partitions, and large splittable files can be processed using multiple tasks.
+
+## 2. Example of parallel execution
+
+Assume your Auto Loader receives 1,000 files.
+
+For illustration, your cluster has four workers, each with four available CPU cores.
+
+# 4
+
+Workers
+
+# 16
+
+Concurrent task slots
+
+# 1,000
+
+Incoming files
+
+Spark can execute approximately 16 single-core tasks at once in this simplified configuration. As tasks finish, new tasks are scheduled until the batch completes.
+
+This is task-level parallelism, not necessarily 16 files at a time.
+
+## 3. How do you control parallel processing?
+
+There are three important controls.
+
+| Configuration                   | Purpose                                                                    |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| `cloudFiles.maxFilesPerTrigger` | Soft limit on new files per micro-batch                                    |
+| `cloudFiles.maxBytesPerTrigger` | Soft limit on input bytes per micro-batch                                  |
+| `spark.sql.shuffle.partitions`  | Number of partitions for shuffle operations such as joins and aggregations |
+
+For example:
+
+```
+df = (    spark.readStream    .format("cloudFiles")    .option("cloudFiles.format", "csv")    .option("cloudFiles.maxFilesPerTrigger", 100)    .load(source_path))
+```
+
+This asks Auto Loader to process approximately 100 new files per micro-batch, subject to its admission controls.
+
+It does not mean 100 files will execute simultaneously. The actual parallelism depends on Spark partitions, executor resources, and the operations performed.
+
+## 4. What happens to checkpoints during parallel execution?
+
+This connects directly to the `commits`, `offsets`, and `sources` folders in your screenshot.
+
+Suppose 100 files are included in micro-batch 0.
+
+1. Auto Loader identifies the files using its discovery state.
+2. Spark records the batch's source offsets in `offsets/0`.
+3. Spark distributes the input partitions across workers.
+4. Workers process their assigned partitions in parallel.
+5. Spark completes the Delta write and records the successful batch in `commits/0`.
+
+If a worker fails, Spark can retry its task. If the entire streaming query fails before the batch is committed, the checkpoint enables recovery and replay.
+
+## 5. Interactive example: Batch size versus parallelism
+
+Change the settings below to see how the number of batches and concurrent tasks differ.
+
+Incoming files
+
+1,000
+
+Max files per micro-batch
+
+100
+
+Workers (4 cores each)
+
+4
+
+Estimated micro-batches
+
+# 10
+
+Concurrent task slots
+
+# 16
+
+Illustrative task-slot allocation
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
+9
+
+10
+
+11
+
+12
+
+13
+
+14
+
+15
+
+16
+
+Illustrative model assuming four usable task slots per worker, full file batches, and no byte-limit constraints. Actual task counts and batch sizes may differ.
+
+## 6. Can two Auto Loader jobs run in parallel?
+
+Yes. For example, you can run two separate streaming queries:
+
+- Job 1: `orders` CSV files → `bronze_orders`
+- Job 2: `customers` CSV files → `bronze_customers`
+
+Each should have its own checkpoint directory:
+
+```
+checkpoints/
+    orders/
+    customers/
+```
+
+Never use the same checkpoint directory for two independently running streaming queries. Their progress and recovery state must remain isolated.
+
+Also, avoid running two concurrent instances of the same streaming query against the same checkpoint. Use one active query and scale its Spark resources or partitions instead.
+
+## 7. How to check actual parallelism in Databricks
+
+After running your Auto Loader notebook:
+
+1. Open the Spark UI for the compute running the query.
+2. Go to the Stages tab.
+3. Inspect the number of tasks for each stage.
+4. Check how many tasks execute concurrently.
+5. Review task duration, input size, and shuffle metrics.
+
+This will show you the actual parallel execution rather than just the configured batch size.
+
+Interview-ready answer:
+
+"Databricks Auto Loader achieves parallelism through Spark's distributed execution engine. Auto Loader handles incremental file discovery and checkpoint-based progress tracking, while Spark distributes file-reading, transformation, and writing tasks across executors. We control ingestion batch sizes using `maxFilesPerTrigger` and `maxBytesPerTrigger`, and execution parallelism through Spark partitions and compute resources. Checkpointing provides fault tolerance and allows processing to resume after failures."
+
+For your current Databricks Free Edition Auto Loader project, the next useful exercise is to upload 100 small CSV files, run Auto Loader, and examine the Spark task execution and checkpoint changes. This will demonstrate the difference between file ingestion batching and actual parallel processing.
